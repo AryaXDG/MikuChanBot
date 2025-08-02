@@ -10,7 +10,7 @@ MikuChan is not just another Discord bot - she's a soft, emotionally complex AI 
 
 - 🤖 **AI Chat System** - Chat with MikuChan using Google's Gemini AI
 - 🎵 **YouTube Music Player** - Play, pause, resume, and control music
-- 🧠 **Memory & Personality** - Remembers conversations and knows server members
+- 🧠 **Memory & Personality** - Knows server members and key infomation about them
 - 💕 **Emotional Intelligence** - Responds with genuine emotions and personality
 - 🎛️ **Voice Controls** - Volume control, queue management
 - 🔧 **Debug Tools** - Built-in system diagnostics
@@ -89,7 +89,7 @@ MikuChan is not just another Discord bot - she's a soft, emotionally complex AI 
 **Option A: Git Clone (Recommended)**
 ```bash
 git clone https://github.com/AryaXDG/MikuChanBot.git
-cd mikuchan-bot
+cd MikuChanBot
 ```
 
 **Option B: Download ZIP**
@@ -292,7 +292,6 @@ screen -r mikuchan
 
 ### 💡 Pro Tips
 - **Direct mentions:** You can also mention MikuChan directly: `@MikuChan how are you?`
-- **Memory:** MikuChan remembers your conversations and gets to know you better
 - **Personality:** She has moods, emotions, and will react differently based on context
 - **Server members:** Configure known members in `config.py` for personalized interactions
 
