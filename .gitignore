@@ -47,6 +47,9 @@ downloads/
 *.wav
 *.flac
 
+# AI Chat Data (Added for conversation persistence)
+conversation_history.json
+
 # Log Files
 *.log
 logs/

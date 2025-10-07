@@ -4,6 +4,8 @@ import asyncio
 import yt_dlp
 import os
 import subprocess
+import time
+import glob
 from dotenv import load_dotenv
 
 # Import AI chat system
@@ -74,6 +76,40 @@ ffmpeg_options = {
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
+# ===================
+# MUSIC QUEUE SYSTEM
+# ===================
+
+class MusicQueue:
+    """Simple music queue for each server"""
+    def __init__(self):
+        self.queue = []
+        self.current = None
+    
+    def add(self, song_data):
+        """Add song to queue"""
+        self.queue.append(song_data)
+    
+    def next(self):
+        """Get next song from queue"""
+        if self.queue:
+            self.current = self.queue.pop(0)
+            return self.current
+        self.current = None
+        return None
+    
+    def clear(self):
+        """Clear the queue"""
+        self.queue.clear()
+        self.current = None
+    
+    def is_empty(self):
+        """Check if queue is empty"""
+        return len(self.queue) == 0
+
+# Dictionary to store queues for each server
+music_queues = {}
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -126,9 +162,75 @@ class YTDLSource(discord.PCMVolumeTransformer):
             traceback.print_exc()
             raise e
 
+# ===================
+# UTILITY FUNCTIONS
+# ===================
+
+def cleanup_old_downloads():
+    """Remove downloaded files older than 1 hour"""
+    try:
+        downloads_dir = 'downloads'
+        if not os.path.exists(downloads_dir):
+            return
+        
+        cutoff_time = time.time() - 3600  # 1 hour ago
+        removed = 0
+        
+        for file_path in glob.glob(f"{downloads_dir}/*"):
+            try:
+                if os.path.getmtime(file_path) < cutoff_time:
+                    os.remove(file_path)
+                    removed += 1
+            except Exception as e:
+                if DEBUG_CONFIG["verbose_errors"]:
+                    print(f"⚠️ Failed to remove {file_path}: {e}")
+        
+        if removed > 0:
+            print(f"🗑️ Cleaned up {removed} old download(s)")
+    except Exception as e:
+        print(f"⚠️ Cleanup error: {e}")
+
+async def play_next(ctx):
+    """Play the next song in queue"""
+    guild_id = ctx.guild.id
+    
+    if guild_id not in music_queues or music_queues[guild_id].is_empty():
+        # Queue is empty, reset status
+        await bot.change_presence(activity=discord.Game(name="🎵 Music & AI Chat | !help"))
+        return
+    
+    try:
+        next_song = music_queues[guild_id].next()
+        if next_song and ctx.voice_client:
+            player = next_song['player']
+            
+            def after_callback(error):
+                if error:
+                    print(f'❌ Playback error: {error}')
+                asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+            
+            ctx.voice_client.play(player, after=after_callback)
+            
+            # Update bot status
+            await bot.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.listening,
+                    name=next_song['title'][:128]
+                )
+            )
+            
+            await ctx.send(f"🎵 Now playing: **{next_song['title']}**")
+    except Exception as e:
+        print(f"❌ Error in play_next: {e}")
+        await ctx.send("❌ Failed to play next song!")
+
 @bot.event
 async def on_ready():
     print(f"✅ MikuChan is online as {bot.user}")
+    
+    # Cleanup old downloads on startup
+    print("🗑️ Cleaning up old downloads...")
+    cleanup_old_downloads()
     
     # Initialize AI chat system
     print("🤖 Initializing AI chat system...")
@@ -141,6 +243,18 @@ async def on_ready():
         print("❌ AI chat system failed to initialize")
         await bot.change_presence(activity=discord.Game(name="🎵 Music Only | !help"))
 
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Handle voice state changes"""
+    # If bot was disconnected, clean up queue
+    if member == bot.user and before.channel and not after.channel:
+        guild_id = member.guild.id
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
+            print(f"🔌 Disconnected from voice, cleared queue for guild {guild_id}")
+        # Reset status
+        await bot.change_presence(activity=discord.Game(name="🎵 Music & AI Chat | !help"))
+
 # ===================
 # AI CHAT COMMANDS
 # ===================
@@ -149,7 +263,7 @@ async def on_ready():
 async def chat(ctx, *, message):
     """Chat with MikuChan AI! Usage: !chat <your message>"""
     if not miku_ai.initialized:
-        await ctx.send("Sorry, my AI brain isn't working right now 😔 Try again later!")
+        await ctx.send("Sorry, my AI brain isn't working right now 😢 Try again later!")
         return
     
     # Show typing indicator
@@ -209,7 +323,7 @@ async def aistats(ctx):
         await ctx.send("❌ Failed to get AI statistics!")
 
 # ===================
-# MUSIC COMMANDS (Existing)
+# MUSIC COMMANDS
 # ===================
 
 @bot.command()
@@ -227,7 +341,7 @@ async def join(ctx):
 
 @bot.command()
 async def play(ctx, *, query):
-    """Play a song from YouTube"""
+    """Play a song from YouTube or add to queue"""
     if not ctx.voice_client:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
@@ -235,41 +349,100 @@ async def play(ctx, *, query):
             await ctx.send("❌ You're not in a voice channel!")
             return
 
-    # Stop current playback if any
-    if ctx.voice_client.is_playing():
-        ctx.voice_client.stop()
+    # Initialize queue for this guild if needed
+    guild_id = ctx.guild.id
+    if guild_id not in music_queues:
+        music_queues[guild_id] = MusicQueue()
 
     async with ctx.typing():
         try:
             print(f"Searching for: {query}")
-            
-            # Try downloading first (more reliable than streaming)
             player = await YTDLSource.from_url(query, loop=bot.loop, stream=False)
             print(f"Successfully created player for: {player.title}")
             
-            # Play with detailed error callback
-            def after_playing(error):
-                if error:
-                    print(f'❌ Playback error: {error}')
-                else:
-                    print('✅ Playback finished successfully')
-            
-            ctx.voice_client.play(player, after=after_playing)
-            
-            # Check if it's actually playing
-            await asyncio.sleep(2)  # Give it more time to start
+            # If something is playing, add to queue
             if ctx.voice_client.is_playing():
-                await ctx.send(f"🎵 Now playing: **{player.title}**")
-                print("✅ Audio is playing!")
+                music_queues[guild_id].add({'player': player, 'title': player.title})
+                position = len(music_queues[guild_id].queue)
+                await ctx.send(f"➕ Added to queue: **{player.title}**\nPosition: #{position}")
             else:
-                await ctx.send(f"❌ Failed to play: **{player.title}** - Check terminal for errors")
-                print("❌ Audio is NOT playing!")
+                # Play immediately
+                def after_playing(error):
+                    if error:
+                        print(f'❌ Playback error: {error}')
+                    asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+                
+                ctx.voice_client.play(player, after=after_playing)
+                music_queues[guild_id].current = player.title
+                
+                # Update bot status
+                await bot.change_presence(
+                    activity=discord.Activity(
+                        type=discord.ActivityType.listening,
+                        name=player.title[:128]
+                    )
+                )
+                
+                await asyncio.sleep(1)
+                if ctx.voice_client.is_playing():
+                    await ctx.send(f"🎵 Now playing: **{player.title}**")
+                else:
+                    await ctx.send(f"❌ Failed to play: **{player.title}**")
                 
         except Exception as e:
             await ctx.send(f"❌ An error occurred: {str(e)}")
             print(f"Play command error: {e}")
             import traceback
             traceback.print_exc()
+
+@bot.command()
+async def queue(ctx):
+    """Show the current music queue"""
+    guild_id = ctx.guild.id
+    
+    if guild_id not in music_queues:
+        await ctx.send("📭 The queue is empty!")
+        return
+    
+    queue_obj = music_queues[guild_id]
+    
+    if not queue_obj.current and queue_obj.is_empty():
+        await ctx.send("📭 The queue is empty!")
+        return
+    
+    embed = discord.Embed(title="🎵 Music Queue", color=0x00ff9f)
+    
+    if queue_obj.current:
+        embed.add_field(name="▶️ Now Playing", value=queue_obj.current, inline=False)
+    
+    if not queue_obj.is_empty():
+        queue_list = queue_obj.queue
+        queue_text = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(queue_list[:10])])
+        if len(queue_list) > 10:
+            queue_text += f"\n... and {len(queue_list) - 10} more"
+        embed.add_field(name="⏭️ Up Next", value=queue_text, inline=False)
+        embed.set_footer(text=f"Total in queue: {len(queue_list)}")
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def skip(ctx):
+    """Skip the current song"""
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()  # This triggers the after callback
+        await ctx.send("⏭️ Skipped!")
+    else:
+        await ctx.send("❌ Nothing is playing!")
+
+@bot.command()
+async def clear(ctx):
+    """Clear the music queue"""
+    guild_id = ctx.guild.id
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+        await ctx.send("🗑️ Queue cleared!")
+    else:
+        await ctx.send("📭 Queue is already empty!")
 
 @bot.command()
 async def pause(ctx):
@@ -294,6 +467,10 @@ async def stop(ctx):
     """Stop the current song"""
     if ctx.voice_client:
         ctx.voice_client.stop()
+        guild_id = ctx.guild.id
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
+        await bot.change_presence(activity=discord.Game(name="🎵 Music & AI Chat | !help"))
         await ctx.send("⏹️ Stopped the music!")
     else:
         await ctx.send("❌ Not connected to a voice channel!")
@@ -302,7 +479,11 @@ async def stop(ctx):
 async def leave(ctx):
     """Leave the voice channel"""
     if ctx.voice_client:
+        guild_id = ctx.guild.id
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
         await ctx.voice_client.disconnect()
+        await bot.change_presence(activity=discord.Game(name="🎵 Music & AI Chat | !help"))
         await ctx.send("👋 MikuChan has left the voice channel.")
     else:
         await ctx.send("❌ Not connected to a voice channel!")
@@ -320,7 +501,7 @@ async def volume(ctx, volume: int):
         await ctx.send("❌ Volume must be between 0 and 100!")
 
 # ===================
-# DEBUG/TEST COMMANDS (Existing)
+# DEBUG/TEST COMMANDS
 # ===================
 
 @bot.command()
@@ -418,7 +599,7 @@ async def test(ctx):
         await ctx.send(f"❌ Error testing FFmpeg: {e}")
 
 # ===================
-# HELP COMMAND (Enhanced)
+# HELP COMMAND
 # ===================
 
 @bot.command(name='mikuhelp')
@@ -460,9 +641,12 @@ async def mikuhelp_command(ctx, command_name=None):
     music_commands = [
         "**!join** - Join your voice channel",
         "**!play <song>** - Play music from YouTube",
+        "**!queue** - Show current music queue",
+        "**!skip** - Skip current song",
+        "**!clear** - Clear the queue",
         "**!pause** - Pause current song",
         "**!resume** - Resume paused song",
-        "**!stop** - Stop current song",
+        "**!stop** - Stop music and clear queue",
         "**!leave** - Leave voice channel",
         "**!volume <0-100>** - Change volume"
     ]
