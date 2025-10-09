@@ -3,10 +3,10 @@
 import asyncio
 import json
 import time
+import os
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import google.generativeai as genai
-import os
 from config import SERVER_MEMBERS, MIKU_PERSONALITY, CHAT_CONFIG, DEBUG_CONFIG
 
 class RateLimiter:
@@ -130,6 +130,29 @@ class MikuChatAI:
         self.genai_client = None
         self.model = None
         self.initialized = False
+        self.history_file = "conversation_history.json"
+        self._load_history()
+    
+    def _load_history(self):
+        """Load conversation history from file"""
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.personality_engine.conversation_history = data
+                    print(f"📚 Loaded conversation history for {len(data)} users")
+        except Exception as e:
+            if DEBUG_CONFIG["verbose_errors"]:
+                print(f"⚠️ Failed to load history: {e}")
+    
+    def _save_history(self):
+        """Save conversation history to file"""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.personality_engine.conversation_history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            if DEBUG_CONFIG["verbose_errors"]:
+                print(f"⚠️ Failed to save history: {e}")
         
     async def initialize(self, api_key: str) -> bool:
         """Initialize the Gemini AI client"""
@@ -197,7 +220,7 @@ Respond now as MikuChan:""")
         """Generate AI response. Returns (response, success)"""
         
         if not self.initialized:
-            return "Sorry, my AI brain isn't working right now 😔", False
+            return "Sorry, my AI brain isn't working right now 😢", False
         
         # Check rate limiting
         is_limited, reset_time = self.rate_limiter.is_rate_limited(user_id)
@@ -235,6 +258,9 @@ Respond now as MikuChan:""")
                 
                 # Add to conversation history
                 self.personality_engine.add_to_history(user_id, user_message, response_text)
+                
+                # Save history to file
+                self._save_history()
                 
                 if DEBUG_CONFIG["log_ai_requests"]:
                     print(f"✅ Generated response ({len(response_text)} chars)")
